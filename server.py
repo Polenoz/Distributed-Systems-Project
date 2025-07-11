@@ -8,7 +8,7 @@ import time
 class ChatServer:
     def __init__(self):
         # Server- und Discovery-Port
-        self.port = 5003  # Port individuell setzen je Server-Instanz
+        self.port = 5000  # Port individuell setzen je Server-Instanz
         self.discovery_port = 5010
 
         # Eindeutige Server-ID und Leader-Status
@@ -32,7 +32,7 @@ class ChatServer:
 
         # Client- und Server-Listen
         self.known_clients = {}  # client_id: {ip, port, name}
-        self.known_servers = {}  # server_id: {ip, port, isLeader}
+        self.known_servers = {}  # server_id: {ip, port, isLeader, last_heartbeat}
 
     def start_server(self):
         # Serverstart und Start der parallelen Threads
@@ -41,14 +41,21 @@ class ChatServer:
         print(
             f"Listening for discovery messages on port {self.discovery_port} ...")
 
-        threading.Thread(target=self.listen_on_server_port).start()
-        threading.Thread(target=self.listen_on_discovery_port).start()
-        threading.Thread(target=self.monitor_heartbeat).start()
-        threading.Thread(target=self.broadcast_discovery).start()
+        threading.Thread(target=self.listen_on_server_port,
+                         daemon=True).start()
+        threading.Thread(target=self.listen_on_discovery_port,
+                         daemon=True).start()
+        threading.Thread(target=self.monitor_heartbeat, daemon=True).start()
+        threading.Thread(target=self.broadcast_discovery, daemon=True).start()
+        threading.Thread(target=self.remove_dead_servers, daemon=True).start()
 
         time.sleep(10)  # Zeit für Discovery der anderen Server
         print("Initiating leader election at startup...")
         self.initiate_leader_election()
+
+        # Hauptthread am Leben halten
+        while True:
+            time.sleep(1)
 
     def broadcast_discovery(self):
         # Regelmäßige Broadcast-Nachrichten zur Server-Discovery
@@ -84,6 +91,23 @@ class ChatServer:
                 print("Leader unresponsive. Initiating leader election.")
                 self.initiate_leader_election()
 
+    def remove_dead_servers(self):
+        # Entfernt Server, die zu lange keinen Heartbeat gesendet haben
+        while True:
+            time.sleep(5)
+            now = time.time()
+            to_remove = []
+            for server_id, info in list(self.known_servers.items()):
+                if server_id == self.id:
+                    continue
+                last_hb = info.get("last_heartbeat", 0)
+                if now - last_hb > 20:
+                    print(
+                        f"Entferne toten Server {server_id} ({info['ip']}:{info['port']}) aus known_servers.")
+                    to_remove.append(server_id)
+            for server_id in to_remove:
+                self.known_servers.pop(server_id, None)
+
     def listen_on_discovery_port(self):
         # Empfang von Discovery-, Heartbeat- oder Leader-Nachrichten
         while True:
@@ -98,9 +122,13 @@ class ChatServer:
                         "id": server_id,
                         "ip": server_ip,
                         "port": data['port'],
-                        "isLeader": data['isLeader']
+                        "isLeader": data['isLeader'],
+                        "last_heartbeat": time.time()
                     }
                     print(f"Discovered new server: {server_ip}:{data['port']}")
+                else:
+                    self.known_servers[server_id]["ip"] = server_ip
+                    self.known_servers[server_id]["port"] = data["port"]
 
             elif data["type"] == "leader":
                 # Leader wurde verkündet
@@ -116,12 +144,24 @@ class ChatServer:
                         "id": leader_id,
                         "ip": address[0],
                         "port": data["port"],
-                        "isLeader": True
+                        "isLeader": True,
+                        "last_heartbeat": time.time()
                     }
 
             elif data["type"] == "heartbeat":
                 if server_id != self.id:
                     self.last_heartbeat = time.time()
+                    if server_id in self.known_servers:
+                        self.known_servers[server_id]["last_heartbeat"] = time.time(
+                        )
+                    else:
+                        self.known_servers[server_id] = {
+                            "id": server_id,
+                            "ip": server_ip,
+                            "port": data['port'],
+                            "isLeader": False,
+                            "last_heartbeat": time.time()
+                        }
                     print(
                         f"Heartbeat received from leader {server_ip}:{data['port']}.")
 
@@ -134,17 +174,46 @@ class ChatServer:
         if my_index is None:
             print("This server not in known_servers.")
             return
-        next_server = sorted_servers[(my_index + 1) % len(sorted_servers)]
-        next_address = (next_server["ip"], next_server["port"])
 
-        try:
-            self.server_socket.sendto(json.dumps({
-                "type": "election",
-                "token": token_id
-            }).encode(), next_address)
-        except:
-            print(f"Removing unreachable server {next_server['id']}")
-            self.known_servers.pop(next_server["id"], None)
+        if len(sorted_servers) == 1:
+            print("Nur ein Server im Ring. Ich werde Leader.")
+            self.is_leader = True
+            self.broadcast_leader()
+            threading.Thread(target=self.broadcast_heartbeat,
+                             daemon=True).start()
+            self.voted = True
+            return
+
+        for offset in range(1, len(sorted_servers)):
+            next_index = (my_index + offset) % len(sorted_servers)
+            next_server = sorted_servers[next_index]
+            next_address = (next_server["ip"], next_server["port"])
+            if next_server["id"] == self.id:
+                print("Kein anderer erreichbarer Server. Ich werde Leader.")
+                self.is_leader = True
+                self.broadcast_leader()
+                threading.Thread(
+                    target=self.broadcast_heartbeat, daemon=True).start()
+                self.voted = True
+                return
+            try:
+                print(
+                    f"Sende Election-Token an {next_server['ip']}:{next_server['port']} (ID: {next_server['id']})")
+                self.server_socket.sendto(json.dumps({
+                    "type": "election",
+                    "token": token_id
+                }).encode(), next_address)
+                return
+            except Exception as e:
+                print(
+                    f"Entferne unerreichbaren Server {next_server['id']}: {e}")
+                self.known_servers.pop(next_server["id"], None)
+
+        print("Kein erreichbarer Server im Ring. Ich werde Leader.")
+        self.is_leader = True
+        self.broadcast_leader()
+        threading.Thread(target=self.broadcast_heartbeat, daemon=True).start()
+        self.voted = True
 
     def broadcast_leader(self):
         # Broadcastet, dass man selbst der neue Leader ist
@@ -189,7 +258,7 @@ class ChatServer:
                         self.server_socket.sendto(json.dumps(
                             welcome).encode(), (client_ip, client_port))
 
-                        # ❗NEU: Benachrichtige andere Clients über Beitritt
+                        # Benachrichtige andere Clients über Beitritt
                         notice = {
                             "type": "notice",
                             "text": f"Client {client_number} ist beigetreten."
@@ -204,7 +273,7 @@ class ChatServer:
                     self.broadcast_message(data, sender_id)
 
                 elif data["type"] == "leave":
-                    # ❗NEU: Client hat den Chat verlassen
+                    # Client hat den Chat verlassen
                     client_id = data["id"]
                     if client_id in self.known_clients:
                         name = self.known_clients[client_id]["name"]
@@ -223,19 +292,19 @@ class ChatServer:
                     if not self.voted:
                         if token_id > self.id:
                             self.forward_token(token_id)
+                            self.voted = True
                         elif token_id < self.id:
                             self.forward_token(self.id)
+                            self.voted = True
                         elif token_id == self.id:
                             print("I have won the election!")
                             self.is_leader = True
                             self.broadcast_leader()
                             threading.Thread(
-                                target=self.broadcast_heartbeat).start()
+                                target=self.broadcast_heartbeat, daemon=True).start()
+                            self.voted = True
                     else:
-                        self.broadcast_leader()
-                        threading.Thread(
-                            target=self.broadcast_heartbeat).start()
-                    self.voted = True
+                        pass  # Kein doppeltes Voting
 
             except Exception as e:
                 print("Server error:", e)
@@ -254,7 +323,7 @@ class ChatServer:
                     print(f"Send error to {client_id}: {e}")
 
     def broadcast_to_others(self, message, exclude=None):
-        # ❗NEU: Nachricht an alle Clients außer 'exclude' (optional)
+        # Nachricht an alle Clients außer 'exclude' (optional)
         for client_id, info in self.known_clients.items():
             if client_id != exclude:
                 try:

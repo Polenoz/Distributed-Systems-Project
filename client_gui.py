@@ -35,7 +35,7 @@ class ChatClient:
 
         # GUI-Setup
         self.root = root
-        self.root.title("Client Chat")
+        self.root.title("Chat Team Sieben")
         self.text_area = scrolledtext.ScrolledText(
             root, wrap=tk.WORD, height=20, width=50)
         self.text_area.pack(padx=10, pady=10)
@@ -122,14 +122,14 @@ class ChatClient:
                     self.log(f"{sender_name}: {data['text']}")
 
                 elif data["type"] == "notice":
-                    # ❗NEU: Systemnachricht (Client X ist beigetreten/verlassen)
+                    # Systemnachricht (Client X ist beigetreten/verlassen)
                     self.log(f"🔔 {data['text']}")
 
             except Exception as e:
                 self.log(f"Empfangsfehler: {e}")
 
     def on_close(self):
-        # ❗NEU: Beim Schließen "leave"-Nachricht an den Server senden
+        # Beim Schließen "leave"-Nachricht an den Server senden
         if self.server_address:
             leave_message = {
                 "type": "leave",
