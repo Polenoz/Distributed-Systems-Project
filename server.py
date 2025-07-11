@@ -8,7 +8,7 @@ import time
 class ChatServer:
     def __init__(self):
         # Server- und Discovery-Port
-        self.port = 5000  # Port individuell setzen je Server-Instanz
+        self.port = 5002  # Port individuell setzen je Server-Instanz
         self.discovery_port = 5010
 
         # Eindeutige Server-ID und Leader-Status
@@ -103,7 +103,7 @@ class ChatServer:
                 last_hb = info.get("last_heartbeat", 0)
                 if now - last_hb > 20:
                     print(
-                        f"Entferne toten Server {server_id} ({info['ip']}:{info['port']}) aus known_servers.")
+                        f"Remove dead server {server_id} ({info['ip']}:{info['port']}) from known_servers.")
                     to_remove.append(server_id)
             for server_id in to_remove:
                 self.known_servers.pop(server_id, None)
@@ -176,7 +176,7 @@ class ChatServer:
             return
 
         if len(sorted_servers) == 1:
-            print("Nur ein Server im Ring. Ich werde Leader.")
+            print("Only one server in the ring. I become the leader.")
             self.is_leader = True
             self.broadcast_leader()
             threading.Thread(target=self.broadcast_heartbeat,
@@ -189,7 +189,7 @@ class ChatServer:
             next_server = sorted_servers[next_index]
             next_address = (next_server["ip"], next_server["port"])
             if next_server["id"] == self.id:
-                print("Kein anderer erreichbarer Server. Ich werde Leader.")
+                print("No other reachable server. I will become the leader.")
                 self.is_leader = True
                 self.broadcast_leader()
                 threading.Thread(
@@ -198,7 +198,7 @@ class ChatServer:
                 return
             try:
                 print(
-                    f"Sende Election-Token an {next_server['ip']}:{next_server['port']} (ID: {next_server['id']})")
+                    f"Send election token to {next_server['ip']}:{next_server['port']} (ID: {next_server['id']})")
                 self.server_socket.sendto(json.dumps({
                     "type": "election",
                     "token": token_id
@@ -206,10 +206,10 @@ class ChatServer:
                 return
             except Exception as e:
                 print(
-                    f"Entferne unerreichbaren Server {next_server['id']}: {e}")
+                    f"Remove unreachable server {next_server['id']}: {e}")
                 self.known_servers.pop(next_server["id"], None)
 
-        print("Kein erreichbarer Server im Ring. Ich werde Leader.")
+        print("No reachable server in the ring. I will become the leader.")
         self.is_leader = True
         self.broadcast_leader()
         threading.Thread(target=self.broadcast_heartbeat, daemon=True).start()
@@ -269,7 +269,7 @@ class ChatServer:
                     # Nachricht von Client empfangen
                     sender_id = data["id"]
                     text = data["text"]
-                    print(f"Nachricht von {sender_id}: {text}")
+                    print(f"Message from {sender_id}: {text}")
                     self.broadcast_message(data, sender_id)
 
                 elif data["type"] == "leave":
